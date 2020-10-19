@@ -51,6 +51,14 @@ void fillRandom(std::vector<float>& src) {
 	});
 }
 
+// typedefs for the functions being passed around
+template <typename BlurT>
+using blurFn = std::function<bool(const BlurT&, const std::vector<float>&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<float>&)>;
+using blur3Fn = blurFn<std::array<float, 3>>;
+using blur7Fn = blurFn<std::array<float, 7>>;
+
+using transposeFn = std::function<bool(const std::vector<float>&, unsigned int, unsigned int, unsigned int, std::vector<float>&)>;
+
 /**
  * Measures the runtime of convolving a blur kernel of size BlurSpread across all image channels.
  * This only measures runtime, and doesn't check correctness of the convolution routines.  The correctness
@@ -68,9 +76,9 @@ void fillRandom(std::vector<float>& src) {
  */
 template <typename BlurKernelT>
 tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned int height, const unsigned int width, const unsigned int depth,
-	std::function<bool(const BlurKernelT&, const std::vector<float>&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<float>&)> horizontalConvolveFn,
-	std::function<bool(const std::vector<float>&, unsigned int, unsigned int, unsigned int, std::vector<float>&)> transposeFn,
-	std::function<bool(const BlurKernelT&, const std::vector<float>&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<float>&)> verticalConvolveFn,
+	blurFn<BlurKernelT> horizontalConvolveFn,
+	transposeFn dataTransposeFn,
+	blurFn<BlurKernelT> verticalConvolveFn,
 	std::vector<float>& dst) {
 
 	tRuntimeInfo runtimeInfo;
@@ -99,7 +107,7 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 
 	runtimeInfo.horizontal = std::chrono::duration<double>(horizEnd - horizStart).count();
 
-	if (transposeFn) {
+	if (dataTransposeFn) {
 		// 1. transpose
 		// 2. horizontal convolve
 		// 3. transpose again so the results are comparable to a simple horiz/vert convolve
@@ -109,7 +117,7 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 		std::vector<float> transposed(dst.size());
 
 		const auto transposeStart = std::chrono::high_resolution_clock::now();
-		transposeFn(dst, height, width, depth, transposed);
+		dataTransposeFn(dst, height, width, depth, transposed);
 		const auto transposeEnd = std::chrono::high_resolution_clock::now();
 
 		runtimeInfo.transpose = std::chrono::duration<double>(transposeEnd - transposeStart).count();
@@ -123,7 +131,7 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 		runtimeInfo.vertical = std::chrono::duration<double>(vertEnd - vertStart).count();
 
 		const auto transpose2Start = std::chrono::high_resolution_clock::now();
-		transposeFn(workingBuffer, height, width, depth, dst);
+		dataTransposeFn(workingBuffer, height, width, depth, dst);
 		const auto transpose2End = std::chrono::high_resolution_clock::now();
 
 		runtimeInfo.transpose += std::chrono::duration<double>(transpose2End - transpose2Start).count();
@@ -177,142 +185,73 @@ int main(int argc, char ** argv) {
 		return 1;
 	}
 
-	// create a H x W x D float matrix for the source, and fill with random float values in [0, 1]
+	// create H x W x D float buffers for the source & dst
 	const auto numElements = H * W * D;
 	std::vector<float> src(numElements);
+	std::vector<float> dst(numElements);
+
+	// fill src with random float values in [0, 1]
 	fillRandom(src);
 
-	// allocate memory for the output
-	std::vector<float> dst(src.size());
+	blur3Fn horizInterleavedBlur3 = convolve1DHorizontalInterleaved<std::array<float, 3>>;
+	blur3Fn vertInterleavedBlur3 = convolve1DVerticalInterleaved<std::array<float, 3>>;
+	blur3Fn horizPlanarBlur3 = convolve1DHorizontalPlanar<std::array<float, 3>>;
+	blur3Fn vertPlanarBlur3 = convolve1DVerticalPlanar<std::array<float, 3>>;
 
-	auto horizInterleavedBlur3 = [](
-		const std::array<float, 3>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DHorizontalInterleaved<std::array<float, 3>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
+	blur7Fn horizInterleavedBlur7 = convolve1DHorizontalInterleaved<std::array<float, 7>>;
+	blur7Fn vertInterleavedBlur7 = convolve1DVerticalInterleaved<std::array<float, 7>>;
+	blur7Fn horizPlanarBlur7 = convolve1DHorizontalPlanar<std::array<float, 7>>;
+	blur7Fn vertPlanarBlur7 = convolve1DVerticalPlanar<std::array<float, 7>>;
 
-	auto vertInterleavedBlur3 = [](
-		const std::array<float, 3>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DVerticalInterleaved<std::array<float, 3>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
+	transposeFn noTransposeFn;
 
-	auto horizInterleavedBlur7 = [](
-		const std::array<float, 7>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DHorizontalInterleaved<std::array<float, 7>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto vertInterleavedBlur7 = [](
-		const std::array<float, 7>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DVerticalInterleaved<std::array<float, 7>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto horizPlanarBlur3 = [](
-		const std::array<float, 3>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DHorizontalPlanar<std::array<float, 3>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto vertPlanarBlur3 = [](
-		const std::array<float, 3>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DVerticalPlanar<std::array<float, 3>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto horizPlanarBlur7 = [](
-		const std::array<float, 7>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DHorizontalPlanar<std::array<float, 7>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto vertPlanarBlur7 = [](
-		const std::array<float, 7>& kernel,
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		unsigned int channelIndex,
-		std::vector<float>& dst) {
-			return convolve1DVerticalPlanar<std::array<float, 7>>(kernel, src, height, width, depth, channelIndex, dst);
-		};
-
-	auto transposePlanarFn = [](
-		const std::vector<float>& src,
-		unsigned int height, unsigned int width, unsigned int depth,
-		std::vector<float>& dst) {
-			return transposePlanar(src, height, width, depth, dst);
-		};
-
-	std::function<bool(const std::vector<float>&, unsigned int, unsigned int, unsigned int, std::vector<float>&)> noTransposeFn;
-
-	tRuntimeInfo minInterleavedBlurSize3Runtime = tRuntimeInfo::Max();
-	tRuntimeInfo minPlanarBlurSize3Runtime = tRuntimeInfo::Max();
-	tRuntimeInfo minInterleavedBlurSize7Runtime = tRuntimeInfo::Max();
-	tRuntimeInfo minPlanarBlurSize7Runtime = tRuntimeInfo::Max();
-	tRuntimeInfo minPlanarBlurSize7WithTransposeRuntime = tRuntimeInfo::Max();
+	tRuntimeInfo minInterleavedBlur3Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlur3Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minInterleavedBlur7Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlur7Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlur7WithTransposeRuntime = tRuntimeInfo::Max();
 
 	for (auto i = 0U; i < I; i++) {
 		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizInterleavedBlur3, noTransposeFn, vertInterleavedBlur3, dst);
-		if (runtime.GetTotal() < minInterleavedBlurSize3Runtime.GetTotal()) {
-			minInterleavedBlurSize3Runtime = runtime;
+		if (runtime.GetTotal() < minInterleavedBlur3Runtime.GetTotal()) {
+			minInterleavedBlur3Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
 		const tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizPlanarBlur3, noTransposeFn, vertPlanarBlur3, dst);
-		if (runtime.GetTotal() < minPlanarBlurSize3Runtime.GetTotal()) {
-			minPlanarBlurSize3Runtime = runtime;
+		if (runtime.GetTotal() < minPlanarBlur3Runtime.GetTotal()) {
+			minPlanarBlur3Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
 		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizInterleavedBlur7, noTransposeFn, vertInterleavedBlur7, dst);
-		if (runtime.GetTotal() < minInterleavedBlurSize7Runtime.GetTotal()) {
-			minInterleavedBlurSize7Runtime = runtime;
+		if (runtime.GetTotal() < minInterleavedBlur7Runtime.GetTotal()) {
+			minInterleavedBlur7Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
 		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, noTransposeFn, vertPlanarBlur7, dst);
-		if (runtime.GetTotal() < minPlanarBlurSize7Runtime.GetTotal()) {
-			minPlanarBlurSize7Runtime = runtime;
+		if (runtime.GetTotal() < minPlanarBlur7Runtime.GetTotal()) {
+			minPlanarBlur7Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
-		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, transposePlanarFn, vertPlanarBlur7, dst);
-		if (runtime.GetTotal() < minPlanarBlurSize7WithTransposeRuntime.GetTotal()) {
-			minPlanarBlurSize7WithTransposeRuntime = runtime;
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, transposePlanar, vertPlanarBlur7, dst);
+		if (runtime.GetTotal() < minPlanarBlur7WithTransposeRuntime.GetTotal()) {
+			minPlanarBlur7WithTransposeRuntime = runtime;
 		}
 	}
 
 	std::cout << "test,horizontal,transpose,vertical,total" << std::endl;
-	std::cout << "interleaved3," << minInterleavedBlurSize3Runtime.toCsv() << std::endl;
-	std::cout << "planar3," << minPlanarBlurSize3Runtime.toCsv() << std::endl;
-	std::cout << "interleaved7," << minInterleavedBlurSize7Runtime.toCsv() << std::endl;
-	std::cout << "planar7," << minPlanarBlurSize7Runtime.toCsv() << std::endl;
-	std::cout << "planar7withTranspose," << minPlanarBlurSize7WithTransposeRuntime.toCsv() << std::endl;
+	std::cout << "interleaved3," << minInterleavedBlur3Runtime.toCsv() << std::endl;
+	std::cout << "planar3," << minPlanarBlur3Runtime.toCsv() << std::endl;
+	std::cout << "interleaved7," << minInterleavedBlur7Runtime.toCsv() << std::endl;
+	std::cout << "planar7," << minPlanarBlur7Runtime.toCsv() << std::endl;
+	std::cout << "planar7withTranspose," << minPlanarBlur7WithTransposeRuntime.toCsv() << std::endl;
 
 	return 0;
 }
