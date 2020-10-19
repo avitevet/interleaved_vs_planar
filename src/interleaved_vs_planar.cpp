@@ -9,22 +9,46 @@
 #include <functional>
 
 typedef struct runtimeInfo {
-	runtimeInfo()
-		: horizontal(0), transpose(0), vertical(0)
+	runtimeInfo(double h, double t, double v)
+		: horizontal(h), transpose(t), vertical(v)
 	{}
-	double horizontal;
-	double transpose;
-	double vertical;
+
+	runtimeInfo()
+		: runtimeInfo(0, 0, 0)
+	{}
 
 	double GetTotal() const {
 		return horizontal + transpose + vertical;
 	};
+
+	static runtimeInfo Max() {
+		return runtimeInfo{ std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max() };
+	}
+
+	std::string toCsv() const {
+		std::stringstream ss;
+		ss << horizontal << "," << transpose << "," << vertical << "," << GetTotal();
+		return ss.str();
+	}
+
+	double horizontal;
+	double transpose;
+	double vertical;
 } tRuntimeInfo;
 
-std::string toCsv(const tRuntimeInfo& info) {
-	std::stringstream ss;
-	ss << info.horizontal << "," << info.transpose << "," << info.vertical << "," << info.GetTotal();
-	return ss.str();
+/**
+ * Fills the vector with random values in [0, 1].  This range for float values is typical in
+ * image processing, where the value represents 0% to 100% ink coverage of a dot (for print) or light intensity (for screen).
+ *
+ * @param[out] src  Vector to fill with random values
+ */
+void fillRandom(std::vector<float>& src) {
+	std::default_random_engine generator;
+	std::uniform_real_distribution<float> dist(0, 1);
+
+	std::transform(src.begin(), src.end(), src.begin(), [&](float val) {
+		return dist(generator);
+	});
 }
 
 /**
@@ -63,6 +87,9 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 	// initialize dst with 0s
 	std::fill(dst.begin(), dst.end(), 0.0f);
 
+	// working buffer
+	std::vector<float> workingBuffer(dst.size());
+
 	// horizontal convolution in every channel
 	const auto horizStart = std::chrono::high_resolution_clock::now();
 	for (auto i = 0U; i < depth; i++) {
@@ -73,7 +100,11 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 	runtimeInfo.horizontal = std::chrono::duration<double>(horizEnd - horizStart).count();
 
 	if (transposeFn) {
-		// out-of-place transpose, then call horizontal convolution again, where the source is the transposed data
+		// 1. transpose
+		// 2. horizontal convolve
+		// 3. transpose again so the results are comparable to a simple horiz/vert convolve
+
+		// Transpose time includes both transposes
 
 		std::vector<float> transposed(dst.size());
 
@@ -85,24 +116,29 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 
 		const auto vertStart = std::chrono::high_resolution_clock::now();
 		for (auto i = 0U; i < depth; i++) {
-			horizontalConvolveFn(blurKernel, transposed, height, width, depth, i, dst);
+			horizontalConvolveFn(blurKernel, transposed, height, width, depth, i, workingBuffer);
 		}
 		const auto vertEnd = std::chrono::high_resolution_clock::now();
 
 		runtimeInfo.vertical = std::chrono::duration<double>(vertEnd - vertStart).count();
+
+		const auto transpose2Start = std::chrono::high_resolution_clock::now();
+		transposeFn(workingBuffer, height, width, depth, dst);
+		const auto transpose2End = std::chrono::high_resolution_clock::now();
+
+		runtimeInfo.transpose += std::chrono::duration<double>(transpose2End - transpose2Start).count();
+
 	}
 	else {
 		// vertical convolution only.  Since this is an out of place operation, the output of the vertical convolve
-		// is a temp buffer, then we copy all the data back into the dst.  We don't include the allocation time
+		// goes into a working buffer, then we copy all the data back into the dst.  We don't include the allocation time
 		// in the vertical convolution time, but we do include the final copy.
-
-		std::vector<float> temp(dst.size());
 
 		const auto vertStart = std::chrono::high_resolution_clock::now();
 		for (auto i = 0U; i < depth; i++) {
-			verticalConvolveFn(blurKernel, dst, height, width, depth, i, temp);
+			verticalConvolveFn(blurKernel, dst, height, width, depth, i, workingBuffer);
 		}
-		std::copy(temp.begin(), temp.end(), dst.begin());
+		std::copy(workingBuffer.begin(), workingBuffer.end(), dst.begin());
 		const auto vertEnd = std::chrono::high_resolution_clock::now();
 
 		runtimeInfo.vertical = std::chrono::duration<double>(vertEnd - vertStart).count();
@@ -112,40 +148,41 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 }
 
 int main(int argc, char ** argv) {
-	if (argc != 4) {
-		std::cout << "Usage: " << argv[0] << " H W D" << std::endl;
-		std::cout << "H is the height, W is the width, and D is the depth (number of channels) of the source matrix to convolve." << std::endl;
+	if (argc != 5) {
+		std::cout << "Usage: " << argv[0] << " H W D I" << std::endl;
+		std::cout << "H: height of the source matrix to convolve" << std::endl;
+		std::cout << "W: width of the source matrix to convolve" << std::endl;
+		std::cout << "D: depth (number of channels) of the source matrix to convolve" << std::endl;
+		std::cout << "I: Number of iterations to perform.  The minimum total time for a single iteration is reported" << std::endl;
 		return 1;
 	}
 
 	std::stringstream ssH(argv[1]);
 	std::stringstream ssW(argv[2]);
 	std::stringstream ssD(argv[3]);
+	std::stringstream ssI(argv[4]);
 
 	unsigned int H = 0;
 	unsigned int W = 0;
 	unsigned int D = 0;
+	unsigned int I = 0;
 
 	ssH >> H;
 	ssW >> W;
 	ssD >> D;
+	ssI >> I;
 
-	if ((H == 0) || (W == 0) || (D == 0)) {
-		std::cout << "H, W, and D must all be positive integers." << std::endl;
+	if ((H == 0) || (W == 0) || (D == 0) || (I == 0)) {
+		std::cout << "H, W, D, and I must all be positive integers." << std::endl;
 		return 1;
 	}
 
-	// create a H x W x D float matrix for the source, using random float values in [0, 1].  This range for float values is typical in
-	// image processing, where the value represents 0% to 100% ink coverage of a dot (for print) or light intensity (for screen).
-	std::default_random_engine generator;
-	std::uniform_real_distribution<float> dist(0, 1);
-
+	// create a H x W x D float matrix for the source, and fill with random float values in [0, 1]
 	const auto numElements = H * W * D;
 	std::vector<float> src(numElements);
-	for (auto i = 0U; i < numElements; i++) {
-		src[i] = dist(generator);
-	}
+	fillRandom(src);
 
+	// allocate memory for the output
 	std::vector<float> dst(src.size());
 
 	auto horizInterleavedBlur3 = [](
@@ -229,20 +266,53 @@ int main(int argc, char ** argv) {
 
 	std::function<bool(const std::vector<float>&, unsigned int, unsigned int, unsigned int, std::vector<float>&)> noTransposeFn;
 
-	tRuntimeInfo interleavedBlurSize3Runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizInterleavedBlur3, noTransposeFn, vertInterleavedBlur3, dst);
-	tRuntimeInfo planarBlurSize3Runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizPlanarBlur3, noTransposeFn, vertPlanarBlur3, dst);
+	tRuntimeInfo minInterleavedBlurSize3Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlurSize3Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minInterleavedBlurSize7Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlurSize7Runtime = tRuntimeInfo::Max();
+	tRuntimeInfo minPlanarBlurSize7WithTransposeRuntime = tRuntimeInfo::Max();
 
-	tRuntimeInfo interleavedBlurSize7Runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizInterleavedBlur7, noTransposeFn, vertInterleavedBlur7, dst);
-	tRuntimeInfo planarBlurSize7Runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, noTransposeFn, vertPlanarBlur7, dst);
+	for (auto i = 0U; i < I; i++) {
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizInterleavedBlur3, noTransposeFn, vertInterleavedBlur3, dst);
+		if (runtime.GetTotal() < minInterleavedBlurSize3Runtime.GetTotal()) {
+			minInterleavedBlurSize3Runtime = runtime;
+		}
+	}
 
-	tRuntimeInfo planarBlurSize7WithTransposeRuntime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, transposePlanarFn, vertPlanarBlur7, dst);
+	for (auto i = 0U; i < I; i++) {
+		const tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizPlanarBlur3, noTransposeFn, vertPlanarBlur3, dst);
+		if (runtime.GetTotal() < minPlanarBlurSize3Runtime.GetTotal()) {
+			minPlanarBlurSize3Runtime = runtime;
+		}
+	}
+
+	for (auto i = 0U; i < I; i++) {
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizInterleavedBlur7, noTransposeFn, vertInterleavedBlur7, dst);
+		if (runtime.GetTotal() < minInterleavedBlurSize7Runtime.GetTotal()) {
+			minInterleavedBlurSize7Runtime = runtime;
+		}
+	}
+
+	for (auto i = 0U; i < I; i++) {
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, noTransposeFn, vertPlanarBlur7, dst);
+		if (runtime.GetTotal() < minPlanarBlurSize7Runtime.GetTotal()) {
+			minPlanarBlurSize7Runtime = runtime;
+		}
+	}
+
+	for (auto i = 0U; i < I; i++) {
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, transposePlanarFn, vertPlanarBlur7, dst);
+		if (runtime.GetTotal() < minPlanarBlurSize7WithTransposeRuntime.GetTotal()) {
+			minPlanarBlurSize7WithTransposeRuntime = runtime;
+		}
+	}
 
 	std::cout << "test,horizontal,transpose,vertical,total" << std::endl;
-	std::cout << "interleaved3," << toCsv(interleavedBlurSize3Runtime) << std::endl;
-	std::cout << "planar3," << toCsv(planarBlurSize3Runtime) << std::endl;
-	std::cout << "interleaved7," << toCsv(interleavedBlurSize7Runtime) << std::endl;
-	std::cout << "planar7," << toCsv(planarBlurSize7Runtime) << std::endl;
-	std::cout << "planar7withTranspose," << toCsv(planarBlurSize7WithTransposeRuntime) << std::endl;
+	std::cout << "interleaved3," << minInterleavedBlurSize3Runtime.toCsv() << std::endl;
+	std::cout << "planar3," << minPlanarBlurSize3Runtime.toCsv() << std::endl;
+	std::cout << "interleaved7," << minInterleavedBlurSize7Runtime.toCsv() << std::endl;
+	std::cout << "planar7," << minPlanarBlurSize7Runtime.toCsv() << std::endl;
+	std::cout << "planar7withTranspose," << minPlanarBlurSize7WithTransposeRuntime.toCsv() << std::endl;
 
 	return 0;
 }
