@@ -155,6 +155,28 @@ tRuntimeInfo measureRuntimeBlur1D(const std::vector<float>& src, const unsigned 
 	return runtimeInfo;
 }
 
+/**
+ * Converts an image in interleaved layout to planar layout
+ *
+ * @param[in] interleavedSrc  Input image, in interleaved layout.  Stride is assumed to be \p width * \p depth
+ * @param[in] height  Number of rows in the image
+ * @param[in] width  Number of columns in the image
+ * @param[in] depth  Number of channels in the image
+ * @param[out] planarDst  Output image, in planar layout.  Stride is assumed to be \p width
+ */
+void interleaved2Planar(const std::vector<float>& interleavedSrc, const unsigned int height, const unsigned int width, const unsigned int depth, std::vector<float>& planarDst) {
+	for (auto row = 0U; row < height; row++) {
+		for (auto col = 0U; col < width; col++) {
+			for (auto ch = 0U; ch < depth; ch++) {
+				const auto interleavedPosition = (row * width + col) * depth + ch;
+				const auto planarPosition = (ch * row * width) + row * width + col;
+
+				planarDst[planarPosition] = interleavedSrc[interleavedPosition];
+			}
+		}
+	}
+}
+
 int main(int argc, char ** argv) {
 	if (argc != 5) {
 		std::cout << "Usage: " << argv[0] << " H W D I" << std::endl;
@@ -187,11 +209,13 @@ int main(int argc, char ** argv) {
 
 	// create H x W x D float buffers for the source & dst
 	const auto numElements = H * W * D;
-	std::vector<float> src(numElements);
+	std::vector<float> interleavedSrc(numElements);
+	std::vector<float> planarSrc(numElements);
 	std::vector<float> dst(numElements);
 
 	// fill src with random float values in [0, 1]
-	fillRandom(src);
+	fillRandom(interleavedSrc);
+	interleaved2Planar(interleavedSrc, H, W, D, planarSrc);
 
 	blur3Fn horizInterleavedBlur3 = convolve1DHorizontalInterleaved<std::array<float, 3>>;
 	blur3Fn vertInterleavedBlur3 = convolve1DVerticalInterleaved<std::array<float, 3>>;
@@ -212,35 +236,35 @@ int main(int argc, char ** argv) {
 	tRuntimeInfo minPlanarBlur7WithTransposeRuntime = tRuntimeInfo::Max();
 
 	for (auto i = 0U; i < I; i++) {
-		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizInterleavedBlur3, noTransposeFn, vertInterleavedBlur3, dst);
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(interleavedSrc, H, W, D, horizInterleavedBlur3, noTransposeFn, vertInterleavedBlur3, dst);
 		if (runtime.GetTotal() < minInterleavedBlur3Runtime.GetTotal()) {
 			minInterleavedBlur3Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
-		const tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(src, H, W, D, horizPlanarBlur3, noTransposeFn, vertPlanarBlur3, dst);
+		const tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 3>>(planarSrc, H, W, D, horizPlanarBlur3, noTransposeFn, vertPlanarBlur3, dst);
 		if (runtime.GetTotal() < minPlanarBlur3Runtime.GetTotal()) {
 			minPlanarBlur3Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
-		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizInterleavedBlur7, noTransposeFn, vertInterleavedBlur7, dst);
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(interleavedSrc, H, W, D, horizInterleavedBlur7, noTransposeFn, vertInterleavedBlur7, dst);
 		if (runtime.GetTotal() < minInterleavedBlur7Runtime.GetTotal()) {
 			minInterleavedBlur7Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
-		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, noTransposeFn, vertPlanarBlur7, dst);
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(planarSrc, H, W, D, horizPlanarBlur7, noTransposeFn, vertPlanarBlur7, dst);
 		if (runtime.GetTotal() < minPlanarBlur7Runtime.GetTotal()) {
 			minPlanarBlur7Runtime = runtime;
 		}
 	}
 
 	for (auto i = 0U; i < I; i++) {
-		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(src, H, W, D, horizPlanarBlur7, transposePlanar, vertPlanarBlur7, dst);
+		tRuntimeInfo runtime = measureRuntimeBlur1D<std::array<float, 7>>(planarSrc, H, W, D, horizPlanarBlur7, transposePlanar, vertPlanarBlur7, dst);
 		if (runtime.GetTotal() < minPlanarBlur7WithTransposeRuntime.GetTotal()) {
 			minPlanarBlur7WithTransposeRuntime = runtime;
 		}
