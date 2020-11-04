@@ -169,7 +169,7 @@ void interleaved2Planar(const std::vector<float>& interleavedSrc, const unsigned
 		for (auto col = 0U; col < width; col++) {
 			for (auto ch = 0U; ch < depth; ch++) {
 				const auto interleavedPosition = (row * width + col) * depth + ch;
-				const auto planarPosition = (ch * row * width) + row * width + col;
+				const auto planarPosition = (ch * height * width) + row * width + col;
 
 				planarDst[planarPosition] = interleavedSrc[interleavedPosition];
 			}
